@@ -10,6 +10,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import path from "node:path";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 
 function reqEnv(name: string): string {
   const v = process.env[name];
@@ -29,8 +31,11 @@ const JWKS = createRemoteJWKSet(new URL(`${ISSUER}/.well-known/jwks.json`));
 // Validate a Supabase access token locally against the project JWKS, return the user id (sub).
 // We do NOT bind `aud` (Supabase default aud is "authenticated", not our URL); RLS is the boundary.
 async function verify(token: string): Promise<string> {
-  const { payload } = await jwtVerify(token, JWKS, { issuer: ISSUER });
+  // Pin ES256 (the project's signing alg) to prevent algorithm-confusion attacks.
+  const { payload } = await jwtVerify(token, JWKS, { issuer: ISSUER, algorithms: ["ES256"] });
   if (!payload.sub) throw new Error("token has no sub");
+  // Only end-user tokens — reject service_role/anon tokens, which would bypass or break RLS.
+  if (payload.role !== "authenticated") throw new Error("unexpected role");
   return payload.sub;
 }
 
@@ -44,6 +49,11 @@ function userClient(jwt: string): SupabaseClient {
 const MEAL = z.enum(["breakfast", "lunch", "dinner", "snack"]);
 const SEX = z.enum(["male", "female", "prefer_not_to_say"]);
 const GOAL = z.enum(["fat_loss", "muscle_gain", "strength", "general_health", "custom"]);
+// Bounded input primitives (defense-in-depth; the DB also CHECK-constrains these).
+const CAL = z.number().int().min(0).max(20000);
+const GRAMS = z.number().min(0).max(5000);
+const DESC = z.string().min(1).max(500);
+const DATE = z.string().max(40);
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] });
 const fail = (msg: string) => ({ content: [{ type: "text" as const, text: msg }], isError: true });
@@ -73,11 +83,11 @@ function buildServer(jwt: string, userId: string): McpServer {
     async () => wrap(await db.rpc("nutrition_day")));
 
   server.registerTool("get_nutrition_day",
-    { description: "Entries, totals, targets, and remaining for a specific date (YYYY-MM-DD).", inputSchema: { date: z.string() } },
+    { description: "Entries, totals, targets, and remaining for a specific date (YYYY-MM-DD).", inputSchema: { date: DATE } },
     async ({ date }) => wrap(await db.rpc("nutrition_day", { p_date: date })));
 
   server.registerTool("get_nutrition_range",
-    { description: "Per-day totals and averages between two dates, inclusive (YYYY-MM-DD).", inputSchema: { start: z.string(), end: z.string() } },
+    { description: "Per-day totals and averages between two dates, inclusive (YYYY-MM-DD).", inputSchema: { start: DATE, end: DATE } },
     async ({ start, end }) => wrap(await db.rpc("nutrition_range", { p_start: start, p_end: end })));
 
   server.registerTool("get_targets",
@@ -86,7 +96,7 @@ function buildServer(jwt: string, userId: string): McpServer {
       .order("effective_from", { ascending: false }).limit(1).maybeSingle()));
 
   server.registerTool("search_entries",
-    { description: "Find logged entries whose description matches text; optional date range.", inputSchema: { query: z.string(), start: z.string().optional(), end: z.string().optional(), limit: z.number().optional() } },
+    { description: "Find logged entries whose description matches text; optional date range.", inputSchema: { query: z.string().min(1).max(200), start: DATE.optional(), end: DATE.optional(), limit: z.number().int().min(1).max(100).optional() } },
     async ({ query, start, end, limit }) => {
       let q = db.from("nutrition_entries").select("*").ilike("description", `%${query}%`);
       if (start) q = q.gte("logged_at", start);
@@ -100,7 +110,7 @@ function buildServer(jwt: string, userId: string): McpServer {
 
   // ── writes (RLS + WITH CHECK enforce ownership) ──────────────────────────
   server.registerTool("log_meal",
-    { description: "Log a meal as structured macros. For a photo, analyze it yourself first, then call this. calories=kcal, macros=grams.", inputSchema: { description: z.string(), calories: z.number(), protein_g: z.number(), carbs_g: z.number(), fat_g: z.number(), meal_type: MEAL.optional(), logged_at: z.string().optional() } },
+    { description: "Log a meal as structured macros. For a photo, analyze it yourself first, then call this. calories=kcal, macros=grams.", inputSchema: { description: DESC, calories: CAL, protein_g: GRAMS, carbs_g: GRAMS, fat_g: GRAMS, meal_type: MEAL.optional(), logged_at: DATE.optional() } },
     async ({ description, calories, protein_g, carbs_g, fat_g, meal_type, logged_at }) => {
       const when = logged_at ? new Date(logged_at) : new Date();
       return wrap(await db.from("nutrition_entries").insert({
@@ -117,7 +127,7 @@ function buildServer(jwt: string, userId: string): McpServer {
     });
 
   server.registerTool("update_entry",
-    { description: "Update fields of an existing entry by id.", inputSchema: { id: z.string(), description: z.string().optional(), calories: z.number().optional(), protein_g: z.number().optional(), carbs_g: z.number().optional(), fat_g: z.number().optional(), meal_type: MEAL.optional(), logged_at: z.string().optional() } },
+    { description: "Update fields of an existing entry by id.", inputSchema: { id: z.string().uuid(), description: DESC.optional(), calories: CAL.optional(), protein_g: GRAMS.optional(), carbs_g: GRAMS.optional(), fat_g: GRAMS.optional(), meal_type: MEAL.optional(), logged_at: DATE.optional() } },
     async ({ id, ...fields }) => {
       const patch = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined));
       if (Object.keys(patch).length === 0) return fail("No fields to update.");
@@ -125,11 +135,11 @@ function buildServer(jwt: string, userId: string): McpServer {
     });
 
   server.registerTool("delete_entry",
-    { description: "Delete an entry by id.", inputSchema: { id: z.string() } },
+    { description: "Delete an entry by id.", inputSchema: { id: z.string().uuid() } },
     async ({ id }) => wrap(await db.from("nutrition_entries").delete().eq("id", id).select()));
 
   server.registerTool("set_targets",
-    { description: "Override daily targets (any subset). calories=kcal, macros=grams. Omitted fields keep their computed value.", inputSchema: { calories: z.number().optional(), protein_g: z.number().optional(), carbs_g: z.number().optional(), fat_g: z.number().optional() } },
+    { description: "Override daily targets (any subset). calories=kcal, macros=grams. Omitted fields keep their computed value.", inputSchema: { calories: CAL.optional(), protein_g: GRAMS.optional(), carbs_g: GRAMS.optional(), fat_g: GRAMS.optional() } },
     async ({ calories, protein_g, carbs_g, fat_g }) => {
       const patch: Record<string, number> = {};
       if (calories !== undefined) patch.tdee_override = Math.round(calories);
@@ -143,7 +153,7 @@ function buildServer(jwt: string, userId: string): McpServer {
     });
 
   server.registerTool("update_profile",
-    { description: "Update profile stats; targets recompute automatically. weight=lb, height=cm, timezone=IANA name.", inputSchema: { weight_lb: z.number().optional(), height_cm: z.number().optional(), age: z.number().optional(), sex: SEX.optional(), training_days_per_week: z.number().optional(), timezone: z.string().optional() } },
+    { description: "Update profile stats; targets recompute automatically. weight=lb, height=cm, timezone=IANA name.", inputSchema: { weight_lb: z.number().min(0).max(2000).optional(), height_cm: z.number().min(0).max(300).optional(), age: z.number().int().min(0).max(150).optional(), sex: SEX.optional(), training_days_per_week: z.number().int().min(0).max(7).optional(), timezone: z.string().max(64).optional() } },
     async (fields) => {
       const patch = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined));
       if (Object.keys(patch).length === 0) return fail("No fields to update.");
@@ -167,7 +177,10 @@ function unauthorized(res: Response) {
 }
 
 const app = express();
+app.set("trust proxy", 1); // Fly terminates TLS in front; trust the first hop for real client IPs
+app.use(helmet({ contentSecurityPolicy: false })); // CSP off — the consent page loads supabase-js from a CDN
 app.use(express.json({ limit: "1mb" }));
+app.use(rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: true, legacyHeaders: false }));
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
@@ -196,11 +209,16 @@ app.post("/mcp", async (req: Request, res: Response) => {
   let userId: string;
   try { userId = await verify(auth.slice(7)); } catch { return unauthorized(res); }
 
-  const server = buildServer(auth.slice(7), userId);
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  res.on("close", () => { transport.close(); server.close(); });
-  await server.connect(transport);
-  await transport.handleRequest(req, res, req.body);
+  try {
+    const server = buildServer(auth.slice(7), userId);
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on("close", () => { transport.close(); server.close(); });
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (e) {
+    console.error("mcp handler error:", e);
+    if (!res.headersSent) res.status(500).json({ error: "internal_error" });
+  }
 });
 
 app.listen(PORT, () => console.log(`nutrition MCP server listening on :${PORT}`));
