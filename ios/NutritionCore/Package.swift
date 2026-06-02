@@ -12,6 +12,8 @@ let package = Package(
         // Runnable under the CLI tools (`swift run NutritionCoreVerify`) — XCTest/Testing
         // need full Xcode, so this is the no-Xcode verification path.
         .executableTarget(name: "NutritionCoreVerify", dependencies: ["NutritionCore"]),
+        // Live check for NutritionAuth against the real backend (env-driven; see main.swift).
+        .executableTarget(name: "NutritionAuthLive", dependencies: ["NutritionCore"]),
         // Full test suite for Xcode / CI (Swift Testing).
         .testTarget(name: "NutritionCoreTests", dependencies: ["NutritionCore"]),
     ]

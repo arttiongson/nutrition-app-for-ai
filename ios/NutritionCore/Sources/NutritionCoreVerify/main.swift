@@ -58,5 +58,14 @@ do {
     check(s.contains("image_base64") && s.contains("meal_type") && s.contains("protein_g_override"), "encoder camelCase → snake_case")
 } catch { check(false, "encoder threw: \(error)") }
 
+// NutritionAuth Session decode + expiry logic (offline)
+do {
+    let json = #"{"access_token":"abc","token_type":"bearer","expires_in":3600,"expires_at":4102444800,"refresh_token":"r"}"#
+    let s = try JSONDecoder.supabase().decode(Session.self, from: Data(json.utf8))
+    check(s.accessToken == "abc" && s.refreshToken == "r" && s.tokenType == "bearer", "session decode")
+    check(!s.isExpired(now: Date(timeIntervalSince1970: 1_780_000_000)), "session not expired (future expiry)")
+    check(s.isExpired(now: Date(timeIntervalSince1970: 4_200_000_000)), "session expired (past expiry)")
+} catch { check(false, "session decode threw: \(error)") }
+
 print(failures == 0 ? "\nALL CHECKS PASSED ✅" : "\n\(failures) CHECK(S) FAILED ❌")
 exit(failures == 0 ? 0 : 1)
