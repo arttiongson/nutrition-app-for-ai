@@ -26,13 +26,15 @@ const MCP_PUBLIC_URL = process.env.MCP_PUBLIC_URL ?? "http://localhost:3000";
 const PORT = Number(process.env.PORT ?? 3000);
 
 const ISSUER = `https://${PROJECT_REF}.supabase.co/auth/v1`;
+const MCP_RESOURCE = `${MCP_PUBLIC_URL}/mcp`;   // RFC 8707: tokens must carry this in `aud`
 const JWKS = createRemoteJWKSet(new URL(`${ISSUER}/.well-known/jwks.json`));
 
 // Validate a Supabase access token locally against the project JWKS, return the user id (sub).
-// We do NOT bind `aud` (Supabase default aud is "authenticated", not our URL); RLS is the boundary.
+// `aud` carries our resource URL (stamped by a Supabase access-token hook), so we bind audience
+// per RFC 8707 — a token minted for another resource is rejected. RLS remains the real boundary.
 async function verify(token: string): Promise<string> {
-  // Pin ES256 (the project's signing alg) to prevent algorithm-confusion attacks.
-  const { payload } = await jwtVerify(token, JWKS, { issuer: ISSUER, algorithms: ["ES256"] });
+  // Pin ES256 (alg-confusion defense) + require our resource URL in `aud` (RFC 8707).
+  const { payload } = await jwtVerify(token, JWKS, { issuer: ISSUER, algorithms: ["ES256"], audience: MCP_RESOURCE });
   if (!payload.sub) throw new Error("token has no sub");
   // Only end-user tokens — reject service_role/anon tokens, which would bypass or break RLS.
   if (payload.role !== "authenticated") throw new Error("unexpected role");
