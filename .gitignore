@@ -1,0 +1,35 @@
+# ── Secrets — NEVER commit ──────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.secret
+secrets.*
+
+# ── Private business notes (cost model, margins, pricing) ────────────────
+PRIVATE_BUSINESS.md
+
+# ── Private source app we port FROM (separate private repo) ──────────────
+# Keep the open-source repo clean of the original fitness app + its history.
+art-fitness/
+
+# ── Supabase local ───────────────────────────────────────────────────────
+supabase/.branches/
+supabase/.temp/
+supabase/.env
+
+# ── Node (MCP server, added in Phase 3) ──────────────────────────────────
+node_modules/
+dist/
+build/
+*.log
+npm-debug.log*
+
+# ── Claude Code / dev MCP config (points at YOUR project — keep out of public repo) ──
+.mcp.json
+.claude/settings.local.json
+
+# ── OS / editor ──────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
