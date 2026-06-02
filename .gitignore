@@ -24,6 +24,13 @@ build/
 *.log
 npm-debug.log*
 
+# ── Swift / SwiftPM / Xcode (iOS app, Phase 4) ───────────────────────────
+.build/
+.swiftpm/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+
 # ── Claude Code / dev MCP config (points at YOUR project — keep out of public repo) ──
 .mcp.json
 .claude/settings.local.json
