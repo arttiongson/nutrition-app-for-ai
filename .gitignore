@@ -5,8 +5,9 @@
 *.secret
 secrets.*
 
-# ── Private business notes (cost model, margins, pricing) ────────────────
+# ── Private business / operational notes ─────────────────────────────────
 PRIVATE_BUSINESS.md
+HANDOFF.md
 
 # ── Private source app we port FROM (separate private repo) ──────────────
 # Keep the open-source repo clean of the original fitness app + its history.
